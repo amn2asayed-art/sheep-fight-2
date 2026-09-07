@@ -78,6 +78,218 @@
 
   // ---------- بدء المباراة الفعلية (خادم المطابقة) ----------
   // السوكِت المخصص هو network_game.network_client.socket وليس network_game.socket.
+  // ملاحظة مهمة: استدعاء requestGame مباشرة لا يكفي لأن دخول اللعبة لشاشة
+  // "بانتظار اللاعبين" ثم دخول المباراة فعلياً يمر عبر خاصية requestingArena
+  // على كائن التحكم (control)، وستتم عبر طريقة playGame الموسيقية.
+  function findPlayControl() {
+    try {
+      var ents = ig.game.entities || [];
+      for (var i = 0; i < ents.length; i++) {
+        var c = ents[i] && ents[i].control;
+        if (c && typeof c.playGame === 'function' && typeof c.gameConfirmed === 'function') return c;
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  // ---------- منظومة التزاوج (Pairing) ----------
+  // يعتمد خادم المطابقة على "بركة" عشوائية، لذلك ننسّق بين الصديقين:
+  // كليهما يرسل طلب المطابقة في اللحظة نفسها (ساعة الخادم)، ثم يتبادلان
+  // معرف الغرفة، فإن اختلفا يعيدان المحاولة حتى يدخلا الغرفة نفسها.
+  var pair = {
+    active: false,
+    attempt: 0,
+    fired: false,
+    retrying: false,
+    waiting: false,
+    syncT: 0,
+    myRoom: null,
+    myPlayer: null,
+    peerRoom: null,
+    probeTimer: null,
+    goTimer: null,
+  };
+
+  function pairMaxAttempts() {
+    return (window.SheepFriendConfig && window.SheepFriendConfig.pairingMaxAttempts) || 5;
+  }
+
+  function serverNow() {
+    try {
+      var ng = ig.game.network_game;
+      if (ng && typeof ng.getServerTime === 'function') return ng.getServerTime();
+    } catch (e) {}
+    return Date.now();
+  }
+
+  function waitUntilServerTime(t, cb) {
+    pair.stopWaiting && pair.stopWaiting();
+    pair.waiting = true;
+    var deadline = Date.now() + 8000;
+    var timer = setInterval(function () {
+      try {
+        if (!pair.waiting || !pair.active) { clearInterval(timer); return; }
+        if (serverNow() >= t || Date.now() > deadline) {
+          clearInterval(timer);
+          pair.waiting = false;
+          try { cb(); } catch (e) {}
+        }
+      } catch (e) { clearInterval(timer); }
+    }, 30);
+    pair.stopWaiting = function () { pair.waiting = false; clearInterval(timer); };
+  }
+
+  // إطلاق طلب المطابقة عبر المسار الرسمي للعبة (playGame)
+  function nativeRequest() {
+    if (!pair.active || pair.fired) return;
+    pair.fired = true;
+    var ctrl = findPlayControl();
+    if (ctrl) {
+      try { ig.game.playerName = currentName(); ctrl.playGame(); } catch (e) {}
+      if (ctrl.requestingArena) return;
+      pair.fired = false;
+    }
+    // احتياط: استدعاء مباشر (المسار غير الرسمي)
+    pair.fired = true;
+    var ng = ig.game.network_game;
+    var data = { playerName: currentName() || ig.game.playerName, avatarId: ig.game.avatarId };
+    ng.requestGame(
+      data,
+      function () {},
+      function () {
+        matchStarting = false;
+        setStatus('فشل بدء المباراة. حاول مرة أخرى.', 'error');
+        pairStop();
+      }
+    );
+  }
+
+  function pairStart() {
+    if (pair.active) return;
+    pair.active = true;
+    pair.attempt = 0;
+    pair.fired = false;
+    pair.retrying = false;
+    pair.myRoom = pair.myPlayer = pair.peerRoom = null;
+    startProbe();
+    var t = serverNow() + 160;
+    pair.syncT = t;
+    rtBroadcast('queue-go', { t: t });
+    waitUntilServerTime(t, function () { try { nativeRequest(); } catch (e) {} });
+  }
+
+  function startProbe() {
+    if (pair.probeTimer) return;
+    pair.probeTimer = setInterval(function () {
+      try {
+        if (!pair.active) return;
+        var ng = ig.game.network_game;
+        var room = ng && ng.roomId;
+        var player = ng && ng.playerId;
+        var count = 0;
+        try { var st = ig.global.initialGameState; count = (st && st.players) ? st.players.length : 0; } catch (e) {}
+        // رصد تغيّر الغرفة المخصصة لي
+        if (typeof room === 'number' && room !== pair.myRoom) {
+          pair.myRoom = room;
+          pair.myPlayer = player;
+          rtBroadcast('room-info', { room: room, player: player, count: count });
+        }
+        // رصد "لا يوجد خصم" من اللعبة نفسها لإعادة المحاولة
+        var ctrl = findPlayControl();
+        if (ctrl && ctrl.noMatchFound && typeof room !== 'number') {
+          ctrl.noMatchFound = false;
+          pairRetry();
+        }
+        if (pair.myRoom !== null && pair.peerRoom !== null) {
+          if (pair.myRoom === pair.peerRoom) {
+            if (count >= 2) pairSuccess();
+          } else {
+            pairRetry();
+          }
+        }
+      } catch (e) {}
+    }, 260);
+  }
+
+  function stopProbe() {
+    if (pair.probeTimer) { clearInterval(pair.probeTimer); pair.probeTimer = null; }
+    if (pair.stopWaiting) { pair.stopWaiting(); pair.stopWaiting = null; }
+    if (pair.goTimer) { clearTimeout(pair.goTimer); pair.goTimer = null; }
+  }
+
+  function pairStop() {
+    pair.active = false;
+    pair.fired = false;
+    stopProbe();
+  }
+
+  function pairSuccess() {
+    pairStop();
+    setStatus('تم الدخول في المباراة مع صديقك.', 'ok');
+  }
+
+  function pairRetry() {
+    if (!pair.active || pair.retrying) return;
+    // إذا دخلنا فعلياً في مباراة ممتلئة بغرفة مختلفة، لا نلغي (قد نلعب مع غريب)
+    try {
+      var st = ig.global && ig.global.initialGameState;
+      if (st && st.players && st.players.length >= 2) {
+        setStatus('تم الدخول في غرفة مختلفة. أعد المحاولة من البداية.', 'error');
+        pairStop();
+        return;
+      }
+    } catch (e) {}
+    pair.attempt++;
+    if (pair.attempt > pairMaxAttempts()) {
+      setStatus('تعذّر التزاوج مع صديقك. اضغط العب مجدداً.', 'error');
+      pairStop();
+      openOverlay();
+      return;
+    }
+    pair.retrying = true;
+    pair.fired = false;
+    pair.myRoom = pair.myPlayer = pair.peerRoom = null;
+    forceCancel();
+    var t = serverNow() + 160;
+    pair.syncT = t;
+    rtBroadcast('queue-retry', { t: t, attempt: pair.attempt });
+    rtBroadcast('queue-go', { t: t });
+    waitUntilServerTime(t, function () { pair.retrying = false; try { nativeRequest(); } catch (e) {} });
+  }
+
+  function forceCancel() {
+    var ctrl = findPlayControl();
+    if (ctrl && typeof ctrl.cancelMatchmaking === 'function') {
+      try { ctrl.cancelMatchmaking(); } catch (e) {}
+    }
+    var ng = ig.game.network_game;
+    try { ng && ng.cancelRequestGame && ng.cancelRequestGame(); } catch (e) {}
+    if (ng) { ng.roomId = null; ng.playerId = null; }
+    try { if (ng) ng.unhandledUpdateQueue = []; } catch (e) {}
+  }
+
+  // أحداث استقبال من الطرف الآخر عبر القناة
+  function onPeerQueueGo(p) {
+    if (!pair.active || pair.fired || pair.retrying) return;
+    var t = (p && typeof p.t === 'number') ? p.t : pair.syncT;
+    waitUntilServerTime(t, function () { try { nativeRequest(); } catch (e) {} });
+  }
+  function onPeerRoomInfo(p) {
+    if (!pair.active || !p) return;
+    pair.peerRoom = p.room;
+  }
+  function onPeerRetry(p) {
+    if (!pair.active) return;
+    if (pair.retrying) return;
+    pair.retrying = false;
+    pair.fired = false;
+    pair.myRoom = pair.myPlayer = pair.peerRoom = null;
+    forceCancel();
+    var t = (p && typeof p.t === 'number') ? p.t : serverNow() + 160;
+    pair.attempt = (p && typeof p.attempt === 'number') ? p.attempt : pair.attempt;
+    waitUntilServerTime(t, function () { try { nativeRequest(); } catch (e) {} });
+  }
+
   function launchGameMatch() {
     try {
       if (!window.ig || !ig.game || !ig.game.network_game) {
@@ -94,23 +306,10 @@
       if (matchStarting) return false;
       matchStarting = true;
 
-      var data = { playerName: currentName() || ig.game.playerName, avatarId: ig.game.avatarId };
-      var ok = ng.requestGame(
-        data,
-        function () { /* onConfirmed: اللعبة ستنتقل للمطابقة تلقائياً */ },
-        function () {
-          matchStarting = false;
-          setStatus('فشل بدء المباراة. حاول مرة أخرى.', 'error');
-        }
-      );
-      if (ok === false) {
-        matchStarting = false;
-        setStatus('تعذّر بدء المباراة الآن.', 'error');
-      } else {
-        // بدأ الإدخال في طابور المطابقة: أغلق النافذة ليعرض اللعبة شاشتها
-        closeOverlay(true);
-      }
-      return ok;
+      // أغلق النافذة ودخل اللعبة تلقائياً في شاشة "بانتظار اللاعبين" ثم يتم التزاوج
+      closeOverlay(true);
+      pairStart();
+      return true;
     } catch (e) {
       matchStarting = false;
       setStatus('حدث خطأ أثناء بدء المباراة.', 'error');
@@ -208,6 +407,7 @@
         rt.hostHadGuest = false;
         roomReady = false;
         peerName = null;
+        if (pair.active) pairStop();
         showReadyState();
         setStatus('غادر صديقك الغرفة. بانتظار انضمام صديق جديد.', 'info');
       }
@@ -226,6 +426,7 @@
           rt.hostHadGuest = false;
           roomReady = false;
           peerName = null;
+          if (pair.active) pairStop();
           showReadyState();
           setStatus('غادر صديقك الغرفة. بانتظار انضمام صديق جديد.', 'info');
         }
@@ -269,6 +470,9 @@
       rt.channel.on('broadcast', { event: 'hb' }, function (msg) { rtOnPeerMessage(msg.payload); });
       rt.channel.on('broadcast', { event: 'bye' }, function () { rtOnPeerBye(); });
       rt.channel.on('broadcast', { event: 'match-start' }, function () { launchedFromPeer(); });
+      rt.channel.on('broadcast', { event: 'queue-go' }, function (msg) { onPeerQueueGo(msg.payload); });
+      rt.channel.on('broadcast', { event: 'room-info' }, function (msg) { onPeerRoomInfo(msg.payload); });
+      rt.channel.on('broadcast', { event: 'queue-retry' }, function (msg) { onPeerRetry(msg.payload); });
       var settled = false;
       rt.channel.subscribe(function (status, sErr) {
         if (settled) return;
@@ -300,6 +504,9 @@
       rt.channel.on('broadcast', { event: 'hb' }, function (msg) { rtOnPeerMessage(msg.payload); });
       rt.channel.on('broadcast', { event: 'bye' }, function () { rtOnPeerBye(); });
       rt.channel.on('broadcast', { event: 'match-start' }, function () { launchedFromPeer(); });
+      rt.channel.on('broadcast', { event: 'queue-go' }, function (msg) { onPeerQueueGo(msg.payload); });
+      rt.channel.on('broadcast', { event: 'room-info' }, function (msg) { onPeerRoomInfo(msg.payload); });
+      rt.channel.on('broadcast', { event: 'queue-retry' }, function (msg) { onPeerRetry(msg.payload); });
       var settled = false;
       rt.channel.subscribe(function (status, sErr) {
         if (settled) return;
@@ -444,6 +651,7 @@
     }
   }
   function resetLocal() {
+    pairStop();
     rtLeave();
     if (role === 'host') myRoomCode = null;
     if (role === 'guest') joinedCode = null;
