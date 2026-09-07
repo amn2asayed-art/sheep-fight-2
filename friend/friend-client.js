@@ -77,6 +77,7 @@
   }
 
   // ---------- بدء المباراة الفعلية (خادم المطابقة) ----------
+  // السوكِت المخصص هو network_game.network_client.socket وليس network_game.socket.
   function launchGameMatch() {
     try {
       if (!window.ig || !ig.game || !ig.game.network_game) {
@@ -84,8 +85,10 @@
         return false;
       }
       var ng = ig.game.network_game;
-      if (!ng.socket || ng.socket.disconnected) {
-        setStatus('خادم المباريات غير متصل.', 'error');
+      var sock = matchSocket(ng);
+      if (!sock || sock.disconnected) {
+        // قد يكون السوكِت ما يزال يتصل (صفحة نشر جديدة): أعد المحاولة ثوانٍ معدودة
+        scheduleLaunch(ng, 0);
         return false;
       }
       if (matchStarting) return false;
@@ -103,6 +106,9 @@
       if (ok === false) {
         matchStarting = false;
         setStatus('تعذّر بدء المباراة الآن.', 'error');
+      } else {
+        // بدأ الإدخال في طابور المطابقة: أغلق النافذة ليعرض اللعبة شاشتها
+        closeOverlay(true);
       }
       return ok;
     } catch (e) {
@@ -110,6 +116,27 @@
       setStatus('حدث خطأ أثناء بدء المباراة.', 'error');
       return false;
     }
+  }
+
+  function matchSocket(ng) {
+    try {
+      if (ng.network_client && ng.network_client.socket) return ng.network_client.socket;
+    } catch (e) {}
+    try { return ng.socket; } catch (e) {}
+    return null;
+  }
+
+  function scheduleLaunch(ng, attempt) {
+    if (!ng || attempt > 5) {
+      setStatus('خادم المباريات غير متصل.', 'error');
+      return;
+    }
+    var sock = matchSocket(ng);
+    if (sock && !sock.disconnected) {
+      launchGameMatch();
+      return;
+    }
+    setTimeout(function () { scheduleLaunch(ng, attempt + 1); }, 1000);
   }
 
   // ============================================================
