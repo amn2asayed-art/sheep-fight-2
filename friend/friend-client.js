@@ -308,6 +308,7 @@
 
       // أغلق النافذة ودخل اللعبة تلقائياً في شاشة "بانتظار اللاعبين" ثم يتم التزاوج
       closeOverlay(true);
+      if (el.fab) el.fab.classList.add('hidden');
       pairStart();
       return true;
     } catch (e) {
@@ -784,12 +785,23 @@
   }
 
   // ---------- إظهار الزر فقط في الشاشة الرئيسية ----------
+  // يُخفي زر "العب مع صديق" أثناء دخول المباراة الفعلية (عند ظهور لوحة
+  // اللعب)، ويُعيد إظهاره عند العودة للشاشة الرئيسية.
   function hideFabIfNotHome() {
     var inMatch = false;
     try {
       if (window.ig && ig.game) {
-        var dir = ig.game.director && ig.game.director.current;
-        if (dir && /(^|\.)(game|end)$/.test(String(dir))) inMatch = true;
+        // الإشارة الموثوقة: دخول شاشة المباراة يُنشئ لوحة اللعب
+        if (ig.game.getEntitiesByType && ig.game.getEntitiesByType('EntityBoard').length > 0) inMatch = true;
+        // احتياط: مستوى المباراة/النهاية حسب ترتيب المستويات الثابت
+        if (!inMatch) {
+          var dir = ig.game.director;
+          if (dir && typeof dir.currentLevel === 'number' && dir.levels && dir.levels[dir.currentLevel]) {
+            var lv = dir.levels[dir.currentLevel];
+            var nm = String(lv && (lv.name || lv.className || ''));
+            if (/(^|\.)(game|end)$/i.test(nm)) inMatch = true;
+          }
+        }
       }
     } catch (e) {}
     if (el.fab) el.fab.classList.toggle('hidden', inMatch);
