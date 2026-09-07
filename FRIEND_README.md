@@ -1,49 +1,55 @@
 # Sheep Fight 2 - نظام اللعب مع صديق
 
 إضافة "العب مع صديق" للعبة **معارك الدجاج**. تعمل كطبقة HTML فوق اللعبة دون تعديل
-`game.js` المضغوط، وتربط صديقين عبر **كود واحد** ثم تبدأ المباراة على خادم المطابقة الخاص بك.
+`game.js` المضغوط، وتربط صديقين عبر **كود واحد** ثم تبدأ المباراة على خادم المطابقة.
+
+## كيف تعمل الآن (Serverless عبر Supabase Realtime)
+
+لا حاجة لأي خادم Node: المتصفح يتصل مباشرة بمشروع **Supabase Realtime** عبر WebSocket
+ويستخدم **broadcast** (بدل الحضور/presence) لنقل رسائل الغرفة. تُدفع الدوال التالية عبر
+قناة `friend-room:<CODE>`:
+
+- `hello` — التعريف بالاسم والصورة (يُرسل عند الدخول وعبر النبضات).
+- `hb` — نبضات كل 2.5 ثانية لمراقبة اتصال الصديق (يُعتبر غادراً بعد 8 ثوانٍ صمت).
+- `bye` — إشعار أفضل جهد عند الإغلاق.
+- `match-start` — إشارة المضيف لبدء المباراة عند الطرفين.
+
+> لماذا broadcast وليس presence؟ مكتبة `supabase-js` UMD المستخدمة تحمل عميل realtime
+> نسخة قديمة لا يكتمل معها ربط الحضور (presence) مع الخادم الحديث للـ Realtime؛ أما
+> `broadcast` فيعمل مباشرة بين العميلين كما هو مُثبت عملياً.
 
 ## المكونات
 
 | الملف | الوظيفة |
 |-------|---------|
-| `friend-server.js` | خادم الأصدقاء: يقدم اللعبة + Socket.IO للربط + Supabase REST (منفذ 3080) |
-| `server.js`        | الخادم الأساسي السابق، أُضيف له أيضاً Socket.IO للربط (منفذ 3070) |
+| `index.html` | يحمّل `friend/supabase-umd.js` ثم `friend/friend-client.js` ويضع `SheepFriendConfig` (URL المفتاح العام وطول الكود) |
+| `friend/supabase-umd.js` | مكتبة `@supabase/supabase-js` UMD (عامة وآمنة للنشر) |
+| `friend/friend-client.js` | منطق الغرفة كاملاً: إنشاء/انضمام/بدء عبر Supabase Realtime |
 | `friend/friend.css` | تنسيق الزر والنافذة |
-| `friend/friend-client.js` | منطق الواجهة: إنشاء غرفة، انضمام، بدء مباراة |
-| `supabase_schema.sql` | مخطط قاعدة البيانات (جدول `friend_rooms`) |
+| `friend-server.js` | خادم محلي قديم (Socket.IO) — للاستخدام المحلي فقط، غير مطلوب للنشر |
+| `supabase_schema.sql` | مخطط قاعدة البيانات للنسخة القديمة (جدول `friend_rooms`) — ليس مطلوباً الآن |
 
-## أولاً: إنشاء قاعدة بيانات Supabase
+`friend/friend-client.js` يقرأ الإعدادات من `window.SheepFriendConfig`:
 
-1. افتح <https://supabase.com> وسجّل الدخول.
-2. اضغط **New project** واملأ الاسم وكلمة المرور (احتفظ بها)، واختر المنطقة.
-3. بعد إنشاء المشروع، من القائمة الجانبية افتح **SQL Editor** ثم **New query**.
-4. انسخ محتوى `supabase_schema.sql` والصقه وشغّله (Run).
-5. من **Settings > API Keys** (ضمن إعدادات المشروع) افتح **Legacy** وانسخ:
-   - **Project URL** (مثل `https://xxxx.supabase.co`)
-   - **service_role key** (سرّي — ضعه في الخادم فقط، ولا تضعه في المتصفح)
-
-## ثانياً: التشغيل
-
-1. انسخ `.env.example` إلى ملف `.env` وضع فيه القيم:
-
-```bash
-SUPABASE_URL=https://YOUR_PROJECT.supabase.co
-SUPABASE_SERVICE_KEY=eyJ...
+```js
+window.SheepFriendConfig = {
+  supabaseUrl: 'https://PROJECT_REF.supabase.co',
+  supabaseAnonKey: 'eyJhbGciOi...ANON_KEY...',
+  codeLength: 6
+};
 ```
 
-2. شغّل الخادم:
+**مفتاح `anon` عام وآمن للنشر** (تقيده سياسات RLS). مفتاح `service_role` سرّي **لا**
+يُرسل للمتصفح أبداً، ولا حاجة له في هذا التصميم.
 
-```bash
-npm start
-```
+## نشر GitHub Pages
 
-(يقرأ `npm start` ملف `.env` تلقائياً ثم يشغّل `friend-server.js`)
+لا يلزم أي خادم. المسارات تُحمَّل من نفس الموقع (`friend/...`)، والاتصال بـ Supabase عبر
+WebSocket مباشر (يعمل من HTTPS وGitHub Pages). تأكد من:
 
-ثم افتح `http://localhost:3080`.
-
-> بدون ضبط Supabase، يعمل النظام بوضع **ذاكرة محلية** للاختبار: يكفي فتح اللعبة في
-> نافذتين (تبويب عادي + خاص/Incognito) وتجربة الربط بينهما.
+1. إنشاء مشروع Supabase مجاني وتفعيل **Realtime** للقناة.
+2. وضع القيم في `window.SheepFriendConfig` داخل `index.html`.
+3. رفع الملفات إلى المستودع (يُستثنى `.env` و `friend-server.js` و `server.js` من النشر).
 
 ## طريقة الاستخدام
 
@@ -55,12 +61,6 @@ npm start
 
 ## ملاحظات على الواجهة
 
-- شاشة **TAP TO START** أُزيلت: اللعبة تبدأ تلقائياً عند انتهاء التحميل (يُخفى زرها
-  ويُضغط في نفس اللحظة لبدء القائمة الرئيسية دون انتظار نقرة).
-- زر صندوق الأصدقاء مثبّت أسفل منتصف الشاشة.
-
-## ملاحظة أمان
-
-- مفتاح `service_role` لا يُرسَل للمتصفح أبداً: المتصفح يتصل بخادمك المحلي، والخادم
-  يتصل بـ Supabase بمفتاح الخدمة.
-- يجب فتح المنفذ (3080) لعملاء خارج النطاق المحلي، وضبط `PUBLIC_HOST` إن لزم.
+- شاشة **TAP TO START** أُزيلت: اللعبة تبدأ تلقائياً عند انتهاء التحميل.
+- زر "العب مع صديق" مثبّت أسفل منتصف الشاشة ويظهر دائماً (لا يعتمد على خادم `/api/config`).
+- عند انضمام صديق باسمك نفسه يُرفض الربط لتجنّب الخلط.

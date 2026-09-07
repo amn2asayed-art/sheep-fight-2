@@ -2,29 +2,40 @@
    Sheep Fight 2 - نظام اللعب مع صديق (Friend System Client)
    ============================================================
    يعمل كطبقة علوية فوق اللعبة. لا يعدّل game.js.
-   يتصل بخادم الأصدقاء friend-server.js عبر socket.io،
-   وعند جهوز الصديقين يضغطان "العب" معاً لبدء المباراة على
-   خادم المطابقة الخاص (SERVER_IP في index.html).
+
+   الإصدار الحالي يعتمد على Supabase Realtime مباشرة (بدون خادم Node):
+     - المضيف ينشئ كود غرفة ويدخل القناة مع حضوره (presence) كـ host.
+     - الضيف يدخل نفس القناة بالكود كـ guest.
+     - يتعرف الطرفان على بعضهما عبر الحضور، ويتبادلان إشارة "بدء المباراة"
+       عبر broadcast، ثم يبدأ كلاهما المباراة على خادم المطابقة (SERVER_IP).
+   هذا يعمل على GitHub Pages وأي استضافة ثابتة.
    ============================================================ */
 (function () {
   'use strict';
 
-  var cfg = { socketPath: '/friend-socket', codeLength: 6 };
-  var socket = null;
-  var myRoomCode = null;   // الكود الذي أنشأناه (مضيف)
-  var joinedCode = null;   // الكود الذي انضممنا إليه (ضيف)
-  var role = null;         // 'host' | 'guest'
-  var roomReady = false;   // هل اكتمل ربط الصديقين
-  var matchStarting = false;
-  var myName = null;       // الاسم المُرسل للخادم
-  var peerName = null;     // اسم الصديق المقابل
-
-  var state = {
-    busy: false,
-    started: false,
+  var rt = {
+    channel: null,
+    role: null,            // 'host' | 'guest' (يُضبط قبل فتح القناة)
+    joinFinalized: false,  // هل اكتمل انضمام الضيف
+    joinCb: null,          // رد انضمام الضيف المعلّق
+    joinTimer: null,       // مهلة "لم يتم العثور على الكود"
+    hostHadGuest: false,   // هل انضم ضيف إلى غرفة المضيف
+    lastPeerSeen: 0,       // آخر نبضة استُلمت من الصديق
+    hbTimer: null,         // مؤقّت إرسال النبضات
+    watchTimer: null,      // مؤقّت مراقبة انقطاع الصديق
   };
 
-  // عناصر الواجهة
+  var sb = null;         // عميل Supabase
+  var myRoomCode = null; // الكود الذي أنشأناه (مضيف)
+  var joinedCode = null; // الكود الذي انضممنا إليه (ضيف)
+  var role = null;       // 'host' | 'guest'
+  var roomReady = false; // هل اكتمل ربط الصديقين
+  var matchStarting = false;
+  var myName = null;     // الاسم المُرسل للصديق
+  var peerName = null;   // اسم الصديق المقابل
+
+  var state = { busy: false, started: false };
+
   var el = {};
 
   function $(id) { return document.getElementById(id); }
@@ -55,9 +66,17 @@
     } catch (e) {}
     return 0;
   }
+  function codeLength() {
+    return (window.SheepFriendConfig && window.SheepFriendConfig.codeLength) || 6;
+  }
+  function randomCode() {
+    var chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    var out = '';
+    for (var i = 0; i < codeLength(); i++) out += chars[Math.floor(Math.random() * chars.length)];
+    return out;
+  }
 
-  // ---------- بدء المباراة الفعلية (خادم المطابقة الخاص) ----------
-  // نعيد سلوك playGame() الموجود في اللعبة حتى يبدأ الطرفان معاً.
+  // ---------- بدء المباراة الفعلية (خادم المطابقة) ----------
   function launchGameMatch() {
     try {
       if (!window.ig || !ig.game || !ig.game.network_game) {
@@ -93,50 +112,211 @@
     }
   }
 
-  // ---------- ربط socket ----------
-  function connectSocket(cb) {
-    if (socket && socket.connected) { cb && cb(); return; }
-    if (!window.io) { cb && cb(new Error('no_io')); return; }
-    var proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    socket = io({ path: cfg.socketPath, transports: ['websocket', 'polling'] });
+  // ============================================================
+  //  طبقة التوصيل عبر Supabase Realtime (broadcast + نبضات)
+  //  ملاحظة: الحضور (presence) غير معتمد في build هذه المكتبة،
+  //  لذلك نستبدله بتحيات ونبضات عبر broadcast.
+  // ============================================================
+  var HB_INTERVAL = 2500;   // إرسال نبضة كل 2.5 ثانية
+  var PEER_TIMEOUT = 8000;  // يعتبر الصديق غادراً بعد 8 ثوانٍ دون نبضة
+  var HOST_WAIT = 6000;     // مهلة الضيف لانتظار المضيف
 
-    socket.on('connect', function () { cb && cb(); });
-    socket.on('connect_error', function () { cb && cb(new Error('connect_error')); });
-    socket.on('disconnect', function (reason) {
-      if (myRoomCode || joinedCode) {
-        setStatus('انقطع الاتصال بخادم الأصدقاء.', 'error');
-      }
-    });
+  function ensureRt(cb) {
+    if (sb) { cb(null); return; }
+    var cfg = window.SheepFriendConfig;
+    if (!cfg || !cfg.supabaseUrl || !cfg.supabaseAnonKey || typeof supabase === 'undefined') {
+      cb('ميزة الأصدقاء غير متاحة الآن (Supabase غير مُهيأ).');
+      return;
+    }
+    try {
+      sb = supabase.createClient(cfg.supabaseUrl, cfg.supabaseAnonKey);
+      cb(null);
+    } catch (e) {
+      sb = null;
+      cb('تعذّر تهيئة اتصال Supabase.');
+    }
+  }
 
-    socket.on('room-ready', function (d) {
-      if (d) {
-        if (role === 'host') { myName = d.host && d.host.name; peerName = d.guest && d.guest.name; }
-        else { myName = d.guest && d.guest.name; peerName = d.host && d.host.name; }
-      }
-      roomReady = true;
-      setStatus('تم الربط! كلاكما جاهز للمباراة. اضغط العب.', 'ok');
-      showReadyState();
-    });
-    socket.on('guest-joined', function (d) {
-      if (role === 'host' && d && d.guestName) {
-        peerName = d.guestName;
+  function rtBroadcast(ev, payload) {
+    if (!rt.channel) return;
+    try {
+      rt.channel.send({ type: 'broadcast', event: ev, payload: payload || {} });
+    } catch (e) {}
+  }
+
+  function rtStartHeartbeat() {
+    rtStopHeartbeat();
+    var send = function () {
+      rtBroadcast('hb', { role: rt.role, name: currentName(), avatar: currentAvatar() });
+    };
+    send();
+    rt.hbTimer = setInterval(send, HB_INTERVAL);
+  }
+  function rtStopHeartbeat() {
+    if (rt.hbTimer) { clearInterval(rt.hbTimer); rt.hbTimer = null; }
+  }
+
+  // معالجة تحيات/نبضات الصديق
+  function rtOnPeerMessage(payload) {
+    if (!payload || !payload.role || payload.role === rt.role) return;
+    if (payload.role === 'host' && rt.role === 'guest') {
+      peerName = payload.name;
+      rt.lastPeerSeen = Date.now();
+      if (!rt.joinFinalized) finalizeGuestJoin({ name: payload.name, avatar: payload.avatar });
+    } else if (payload.role === 'guest' && rt.role === 'host') {
+      peerName = payload.name;
+      rt.lastPeerSeen = Date.now();
+      if (!rt.hostHadGuest) {
+        rt.hostHadGuest = true;
+        roomReady = true;
         showReadyState();
-        if (myRoomCode && !roomReady) setStatus('انضم صديقك (' + d.guestName + ')! اضغط العب لبدء المباراة.', 'ok');
+        setStatus('انضم صديقك (' + peerName + ')! اضغط العب لبدء المباراة.', 'ok');
       }
-    });
-    socket.on('guest-left', function () {
-      roomReady = false;
-      setStatus('غادر صديقك الغرفة. بانتظار انضمام صديق جديد.', 'info');
-      showReadyState();
-    });
-    socket.on('match-start', function () {
-      roomReady = true;
-      setStatus('تبدأ المباراة...', 'ok');
-      launchGameMatch();
-    });
-    socket.on('room-closed', function () {
+    }
+  }
+
+  function rtOnPeerBye() {
+    if (rt.role === 'host') {
+      if (rt.hostHadGuest && Date.now() - rt.lastPeerSeen > 1200) {
+        rt.hostHadGuest = false;
+        roomReady = false;
+        peerName = null;
+        showReadyState();
+        setStatus('غادر صديقك الغرفة. بانتظار انضمام صديق جديد.', 'info');
+      }
+    } else if (rt.joinFinalized) {
+      setStatus('غادر صديقك الغرفة.', 'error');
       closeOverlay(true);
+    }
+  }
+
+  // مراقبة انقطاع الصديق
+  function rtWatchPeer() {
+    rtStopWatch();
+    if (rt.role === 'host') {
+      rt.watchTimer = setInterval(function () {
+        if (rt.hostHadGuest && Date.now() - rt.lastPeerSeen > PEER_TIMEOUT) {
+          rt.hostHadGuest = false;
+          roomReady = false;
+          peerName = null;
+          showReadyState();
+          setStatus('غادر صديقك الغرفة. بانتظار انضمام صديق جديد.', 'info');
+        }
+      }, 1500);
+    } else {
+      rt.watchTimer = setInterval(function () {
+        if (rt.joinFinalized && Date.now() - rt.lastPeerSeen > PEER_TIMEOUT) {
+          setStatus('غادر صديقك الغرفة.', 'error');
+          closeOverlay(true);
+        }
+      }, 1500);
+    }
+  }
+  function rtStopWatch() {
+    if (rt.watchTimer) { clearInterval(rt.watchTimer); rt.watchTimer = null; }
+  }
+
+  function rtLeave() {
+    rtStopHeartbeat();
+    rtStopWatch();
+    if (rt.channel) rtBroadcast('bye', { role: rt.role });
+    var ch = rt.channel;
+    rt.channel = null;
+    rt.role = null; rt.joinFinalized = false; rt.joinCb = null; rt.joinTimer = null;
+    rt.hostHadGuest = false; rt.lastPeerSeen = 0;
+    if (ch && sb) {
+      setTimeout(function () { try { sb.removeChannel(ch); } catch (e) {} }, 0);
+    }
+  }
+
+  // إنشاء غرفة (مضيف): يفتح القناة ويعلن حضوره
+  function rtCreateRoom(cb) {
+    ensureRt(function (err) {
+      if (err) { cb(err); return; }
+      rt.role = 'host';
+      var code = randomCode();
+      rt.hostHadGuest = false;
+      rt.lastPeerSeen = 0;
+      rt.channel = sb.channel('friend-room:' + code);
+      rt.channel.on('broadcast', { event: 'hello' }, function (msg) { rtOnPeerMessage(msg.payload); });
+      rt.channel.on('broadcast', { event: 'hb' }, function (msg) { rtOnPeerMessage(msg.payload); });
+      rt.channel.on('broadcast', { event: 'bye' }, function () { rtOnPeerBye(); });
+      rt.channel.on('broadcast', { event: 'match-start' }, function () { launchedFromPeer(); });
+      rt.channel.subscribe(function (status, sErr) {
+        if (status !== 'SUBSCRIBED') {
+          try { cb((sErr && sErr.message) || 'فشل الاتصال بـ Supabase.'); } catch (e) {}
+          rtLeave();
+          return;
+        }
+        rtBroadcast('hello', { role: 'host', name: currentName(), avatar: currentAvatar(), code: code });
+        rtStartHeartbeat();
+        rtWatchPeer();
+        cb(null, code);
+      });
     });
+  }
+
+  // الانضمام (ضيف): يدخل القناة وينتظر تحية/نبضة المضيف
+  function rtJoinRoom(code, cb) {
+    ensureRt(function (err) {
+      if (err) { cb(err); return; }
+      rt.role = 'guest';
+      rt.joinFinalized = false;
+      rt.joinCb = cb;
+      rt.lastPeerSeen = 0;
+      rt.channel = sb.channel('friend-room:' + code);
+      rt.channel.on('broadcast', { event: 'hello' }, function (msg) { rtOnPeerMessage(msg.payload); });
+      rt.channel.on('broadcast', { event: 'hb' }, function (msg) { rtOnPeerMessage(msg.payload); });
+      rt.channel.on('broadcast', { event: 'bye' }, function () { rtOnPeerBye(); });
+      rt.channel.on('broadcast', { event: 'match-start' }, function () { launchedFromPeer(); });
+      rt.channel.subscribe(function (status, sErr) {
+        if (status !== 'SUBSCRIBED') {
+          rtLeave();
+          cb((sErr && sErr.message) || 'فشل الاتصال بـ Supabase.');
+          return;
+        }
+        rtBroadcast('hello', { role: 'guest', name: currentName(), avatar: currentAvatar() });
+        rtStartHeartbeat();
+        rtWatchPeer();
+        rt.joinTimer = setTimeout(function () {
+          rt.joinTimer = null;
+          if (!rt.joinFinalized) {
+            var cbb = rt.joinCb; rt.joinCb = null;
+            rtLeave();
+            try { cbb && cbb('لم يتم العثور على هذا الكود. تأكد منه.'); } catch (e) {}
+          }
+        }, HOST_WAIT);
+      });
+    });
+  }
+
+  function finalizeGuestJoin(host) {
+    if (rt.joinFinalized) return;
+    var cb = rt.joinCb; rt.joinCb = null;
+    if (!host) return;
+    var mine = String(currentName() || '').trim().toLowerCase();
+    if (host.name && String(host.name).trim().toLowerCase() === mine) {
+      rtLeave();
+      try { cb && cb('اختر اسماً مختلفاً عن اسم الصديق.'); } catch (e) {}
+      return;
+    }
+    rt.joinFinalized = true;
+    if (rt.joinTimer) { clearTimeout(rt.joinTimer); rt.joinTimer = null; }
+    rt.lastPeerSeen = Date.now();
+    try { cb && cb(null, host); } catch (e) {}
+  }
+
+  function launchedFromPeer() {
+    roomReady = true;
+    setStatus('تبدأ المباراة...', 'ok');
+    launchGameMatch();
+  }
+
+  function rtSendMatchStart(cb) {
+    if (!rt.channel) { cb('انقطع الاتصال. حاول مجدداً.'); return; }
+    rt.channel.send({ type: 'broadcast', event: 'match-start', payload: { code: myRoomCode || '' } })
+      .then(function () { cb(null); })
+      .catch(function () { cb('تعذّر إرسال إشارة البدء.'); });
   }
 
   // ---------- منطق المضيف ----------
@@ -146,35 +326,33 @@
     el.hostBtn.disabled = true;
     clearStatus();
     setStatus('جاري إنشاء الغرفة...', 'info');
-    connectSocket(function (err) {
-      if (err) { state.busy = false; el.hostBtn.disabled = false; return setStatus('تعذّر الاتصال بالخادم.', 'error'); }
-      socket.emit('create-room', { playerName: currentName(), avatarId: currentAvatar() }, function (res) {
-        state.busy = false;
-        el.hostBtn.disabled = false;
-        if (!res || !res.ok) return setStatus('تعذّر إنشاء الغرفة: ' + (res && res.error), 'error');
-        role = 'host';
-        myRoomCode = res.code;
-        myName = currentName();
-        el.hostCode.textContent = res.code;
-        el.hostCodeBox.style.display = 'flex';
-        el.hostStatus.textContent = 'شارك هذا الكود مع صديقك ليتمكن من الانضمام.';
-        el.hostPlayBtn.disabled = true; // يُفعَّل عند انضمام الضيف
-        setStatus('بانتظار انضمام صديقك بالكود: ' + res.code, 'info');
-      });
+    rtCreateRoom(function (err, code) {
+      state.busy = false;
+      el.hostBtn.disabled = false;
+      if (err) return setStatus(err, 'error');
+      role = 'host';
+      myRoomCode = code;
+      myName = currentName();
+      el.hostCode.textContent = code;
+      el.hostCodeBox.style.display = 'flex';
+      el.hostStatus.textContent = 'شارك هذا الكود مع صديقك ليتمكن من الانضمام.';
+      el.hostPlayBtn.disabled = true; // يُفعَّل عند انضمام الضيف
+      setStatus('بانتظار انضمام صديقك بالكود: ' + code, 'info');
     });
   }
 
   function hostStart() {
-    if (!roomReady || state.busy || !socket) return;
+    if (!roomReady || state.busy) {
+      if (!roomReady) setStatus('بانتظار انضمام صديقك أولاً.', 'error');
+      return;
+    }
     state.busy = true;
     setStatus('جاري بدء المباراة مع الصديق...', 'ok');
-    socket.emit('start-match', {}, function (res) {
+    rtSendMatchStart(function (err) {
       state.busy = false;
-      if (res && res.ok) {
-        setStatus('البدء...', 'ok');
-      } else {
-        setStatus('لم يكن الطرفان جاهزين بعد. حاول مجدداً.', 'error');
-      }
+      if (err) return setStatus(err, 'error');
+      setStatus('البدء...', 'ok');
+      launchedFromPeer();
     });
   }
 
@@ -183,39 +361,24 @@
     if (state.busy) return;
     var code = (el.joinInput.value || '').trim().toUpperCase();
     if (!code) return setStatus('أدخل كود صديقك أولاً.', 'error');
-    if (code.length !== cfg.codeLength) return setStatus('الكود يجب أن يكون ' + cfg.codeLength + ' أحرف.', 'error');
+    if (code.length !== codeLength()) return setStatus('الكود يجب أن يكون ' + codeLength() + ' أحرف.', 'error');
     state.busy = true;
     el.joinBtn.disabled = true;
     clearStatus();
     setStatus('جاري الاتصال بالغرفة...', 'info');
-    connectSocket(function (err) {
-      if (err) { state.busy = false; el.joinBtn.disabled = false; return setStatus('تعذّر الاتصال بالخادم.', 'error'); }
-      socket.emit('join-room', { code: code, playerName: currentName(), avatarId: currentAvatar() }, function (res) {
-        state.busy = false;
-        el.joinBtn.disabled = false;
-        if (!res || !res.ok) return setStatus('تعذّر الانضمام: ' + friendErrorText(res && res.error), 'error');
-        role = 'guest';
-        joinedCode = res.code;
-        myName = currentName();
-        peerName = res.hostName;
-        if (el.joinStatus) el.joinStatus.textContent = 'تم الربط مع ' + res.hostName + '!';
-        setStatus('تم الربط! بانتظار بدء صديقك المباراة.', 'ok');
-        roomReady = true;
-        showReadyState();
-      });
+    rtJoinRoom(code, function (err, host) {
+      state.busy = false;
+      el.joinBtn.disabled = false;
+      if (err) return setStatus(err, 'error');
+      role = 'guest';
+      joinedCode = code;
+      myName = currentName();
+      peerName = host.name;
+      if (el.joinStatus) el.joinStatus.textContent = 'تم الربط مع ' + host.name + '!';
+      setStatus('تم الربط! بانتظار بدء صديقك المباراة.', 'ok');
+      roomReady = true;
+      showReadyState();
     });
-  }
-
-  function friendErrorText(code) {
-    switch (code) {
-      case 'not_found': return 'لم يتم العثور على هذا الكود. تأكد منه.';
-      case 'room_full': return 'الغرفة ممتلئة بالفعل.';
-      case 'self_join': return 'لا يمكن الانضمام إلى غرفتك الخاصة.';
-      case 'same_name': return 'اختر اسماً مختلفاً عن اسم الصديق.';
-      case 'empty_code': return 'أدخل الكود.';
-      case 'empty_name': return 'أدخل اسمك أولاً في اللعبة.';
-      default: return 'خطأ غير معروف.';
-    }
   }
 
   // ---------- عرض الحالة الجاهزة ----------
@@ -231,7 +394,7 @@
         if (guestLabel) guestLabel.textContent = 'أنت (' + (myName || currentName()) + ')';
       }
     }
-    if (role === 'host' && el.hostPlayBtn) el.hostPlayBtn.disabled = !roomReady && !peerName;
+    if (role === 'host' && el.hostPlayBtn) el.hostPlayBtn.disabled = !(roomReady && peerName);
   }
 
   // ---------- فتح/إغلاق ----------
@@ -241,15 +404,12 @@
   function closeOverlay(silent) {
     el.overlay.classList.remove('open');
     resetLocal();
-    if (socket && (myRoomCode || joinedCode)) {
-      try { socket.emit('leave-room'); } catch (e) {}
-    }
     if (!silent) {
       // لا شيء إضافي
     }
-    resetLocal();
   }
   function resetLocal() {
+    rtLeave();
     if (role === 'host') myRoomCode = null;
     if (role === 'guest') joinedCode = null;
     role = null; roomReady = false; state.busy = false; matchStarting = false;
@@ -382,8 +542,6 @@
 
   // ---------- إظهار الزر فقط في الشاشة الرئيسية ----------
   function hideFabIfNotHome() {
-    // يُظهر الزر في الغالب عند تواجد اللاعب في الشاشة الرئيسية.
-    // نتحقق بشكل دوري: يُظهر الزر دائماً إلا إذا كانت اللعبة قيد مباراة نشطة.
     var inMatch = false;
     try {
       if (window.ig && ig.game) {
@@ -405,18 +563,9 @@
 
   // ---------- البدء ----------
   function init() {
-    fetch('/api/config')
-      .then(function (r) { return r.json(); })
-      .then(function (c) {
-        if (c && c.socketPath) cfg.socketPath = c.socketPath;
-        if (c && c.codeLength) cfg.codeLength = c.codeLength;
-        buildUI();
-        // نحدّث الاسم تلقائياً عند تغيّره في اللعبة
-        setInterval(hideFabIfNotHome, 1200);
-      })
-      .catch(function () {
-        // إذا فشل الاتصال بالخادم نخفي الزر
-      });
+    buildUI();
+    setInterval(hideFabIfNotHome, 1200);
+    ensureRt(function () { /* نتجاهل الخطأ هنا؛ يظهر عند الاستخدام */ });
   }
 
   if (document.readyState === 'loading') {

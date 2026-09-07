@@ -181,7 +181,15 @@
 <!-- END OF TEST -->
 
     <!-- ===== نظام اللعب مع صديق (Friend System) ===== -->
-    <script type="text/javascript" src="/socket.io-client.js"></script>
+    <script type="text/javascript" src="friend/supabase-umd.js"></script>
+    <script type="text/javascript">
+        // اتصال مباشر عبر Supabase Realtime (بدون خادم خلفي)
+        window.SheepFriendConfig = {
+            supabaseUrl: 'https://dsqdwinniqzfoykwvjgz.supabase.co',
+            supabaseAnonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRzcWR3aW5uaXF6Zm95a3d2amd6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg4MDI1OTQsImV4cCI6MjEwNDM3ODU5NH0.4WC3efhpOZarK8a2oYFrxqRybRpqcUBa3iR3J3P_Wc0',
+            codeLength: 6,
+        };
+    </script>
     <script type="text/javascript" src="friend/friend-client.js"></script>
 
     <!-- إزالة شاشة "TAP TO START": تُخفى ويُضغط زرها تلقائياً لبدء اللعبة مباشرة -->
