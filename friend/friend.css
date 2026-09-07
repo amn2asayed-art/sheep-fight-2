@@ -1,0 +1,254 @@
+/* ============================================================
+   Sheep Fight 2 - طبقة اللعب مع صديق (Friend Overlay)
+   ============================================================ */
+
+/* زر فتح نافذة الصداقة (عائم أعلى اللعبة) */
+.friend-fab {
+  position: fixed;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000000;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  font-family: 'evolve', 'gotham', Arial, sans-serif;
+  font-size: 15px;
+  font-weight: bold;
+  color: #fff;
+  background: linear-gradient(180deg, #ff9a3d 0%, #f57401 100%);
+  border: 2px solid rgba(255,255,255,0.35);
+  border-radius: 999px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.45);
+  cursor: pointer;
+  user-select: none;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.friend-fab:hover { transform: translateX(-50%) translateY(-2px); box-shadow: 0 6px 16px rgba(0,0,0,0.55); }
+.friend-fab .ff-icon { font-size: 18px; }
+.friend-fab.hidden { display: none; }
+
+/* خلفية معتمة للنافذة */
+.friend-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000001;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0,0,0,0.6);
+}
+.friend-overlay.open { display: flex; }
+
+/* الصندوق الرئيسي */
+.friend-panel {
+  width: min(520px, 92vw);
+  max-height: 92vh;
+  overflow-y: auto;
+  background: linear-gradient(180deg, #2b1c10 0%, #1b1209 100%);
+  border: 3px solid #f57401;
+  border-radius: 18px;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.7);
+  color: #fff;
+  font-family: 'evolve', 'gotham', Arial, sans-serif;
+  padding: 22px;
+  box-sizing: border-box;
+}
+.friend-panel .fp-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.friend-panel .fp-title {
+  font-size: 24px;
+  font-weight: bold;
+  color: #ffb854;
+  margin: 0;
+}
+.friend-panel .fp-close {
+  background: none;
+  border: none;
+  color: #ffb854;
+  font-size: 26px;
+  cursor: pointer;
+  line-height: 1;
+  padding: 2px 8px;
+}
+.friend-panel .fp-close:hover { color: #ffe3b3; }
+
+.friend-panel .fp-sub {
+  color: #d8c3a0;
+  font-size: 13px;
+  margin: 0 0 16px 0;
+  opacity: 0.85;
+}
+
+/* أقسام المضيف والضيف */
+.friend-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.friend-tab {
+  flex: 1;
+  padding: 10px;
+  border: 2px solid rgba(255,255,255,0.2);
+  border-radius: 10px;
+  background: rgba(255,255,255,0.05);
+  color: #d8c3a0;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: bold;
+  cursor: pointer;
+}
+.friend-tab.active {
+  border-color: #f57401;
+  background: rgba(245,116,1,0.25);
+  color: #ffcf8f;
+}
+
+.friend-view { display: none; }
+.friend-view.active { display: block; }
+
+.friend-panel .fp-label {
+  font-size: 12px;
+  color: #ffcf8f;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin: 14px 0 6px;
+}
+.friend-panel .fp-hint {
+  font-size: 12px;
+  color: #d8c3a0;
+  opacity: 0.85;
+  margin: 4px 0 0;
+}
+
+/* صندوق عرض الكود */
+.friend-code-box {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: #0d0a06;
+  border: 2px dashed #f57401;
+  border-radius: 10px;
+  padding: 14px;
+}
+.friend-code {
+  flex: 1;
+  font-size: 28px;
+  letter-spacing: 6px;
+  font-weight: bold;
+  color: #ffd79b;
+  text-align: center;
+  font-family: 'evolve', 'gotham', Arial, sans-serif;
+}
+.friend-copy {
+  background: #f57401;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-family: inherit;
+  font-weight: bold;
+  cursor: pointer;
+  font-size: 13px;
+}
+.friend-copy:hover { background: #ff9a3d; }
+
+/* حقل إدخال كود الانضمام */
+.friend-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 12px 14px;
+  font-size: 22px;
+  letter-spacing: 4px;
+  text-transform: uppercase;
+  text-align: center;
+  font-family: 'evolve', 'gotham', Arial, sans-serif;
+  color: #ffe3b3;
+  background: #0d0a06;
+  border: 2px solid rgba(255,255,255,0.3);
+  border-radius: 10px;
+  outline: none;
+}
+.friend-input:focus { border-color: #f57401; }
+
+/* أزرار */
+.friend-btn {
+  width: 100%;
+  padding: 13px;
+  margin-top: 14px;
+  border: none;
+  border-radius: 10px;
+  font-family: inherit;
+  font-size: 17px;
+  font-weight: bold;
+  color: #fff;
+  background: linear-gradient(180deg, #37c96b 0%, #1f9d4b 100%);
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.35);
+}
+.friend-btn:hover { filter: brightness(1.08); }
+.friend-btn:disabled {
+  background: #6b5d4c;
+  cursor: not-allowed;
+  filter: none;
+}
+.friend-btn.primary {
+  background: linear-gradient(180deg, #ff9a3d 0%, #f57401 100%);
+}
+.friend-btn.danger {
+  background: linear-gradient(180deg, #e04a4a 0%, #b02a2a 100%);
+}
+
+/* منطقة الحالة */
+.friend-status {
+  min-height: 20px;
+  margin-top: 14px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(255,255,255,0.06);
+  font-size: 13px;
+  color: #d8c3a0;
+  text-align: center;
+  display: none;
+}
+.friend-status.show { display: block; }
+.friend-status.error {
+  background: rgba(224,74,74,0.2);
+  color: #ffb3a0;
+  border: 1px solid rgba(224,74,74,0.5);
+}
+.friend-status.info { color: #d8c3a0; }
+.friend-status.ok {
+  background: rgba(55,201,107,0.2);
+  color: #b5f0cd;
+  border: 1px solid rgba(55,201,107,0.5);
+}
+
+/* صف معلومات اللاعبين بعد الربط */
+.friend-players {
+  margin-top: 14px;
+  display: none;
+  flex-direction: column;
+  gap: 8px;
+}
+.friend-players.show { display: flex; }
+.friend-player {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(255,255,255,0.06);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.friend-player .fp-role { font-size: 12px; color: #ffcf8f; width: 46px; }
+.friend-player .fp-name { font-weight: bold; color: #fff; }
+
+@media (max-width: 480px) {
+  .friend-fab { bottom: 8px; padding: 8px 12px; font-size: 13px; }
+  .friend-panel { padding: 16px; }
+}

@@ -1,0 +1,21 @@
+# Supabase secrets - NEVER commit
+.env
+
+# Node
+node_modules/
+
+# Dev/session artifacts
+.playwright-mcp/
+*.log
+
+# Local screenshots (not part of the game)
+game-state.png
+menu-state.png
+splash-capture.png
+splash-capture2.png
+
+# Unmodified original for local-only restore
+game.js.original
+
+# Backup of original media (large, not served)
+media_original_backup/

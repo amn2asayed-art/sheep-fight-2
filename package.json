@@ -1,0 +1,16 @@
+{
+  "name": "sheep-fight-2",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Sheep Fight 2 (Chicken Battles) - مع نظام اللعب مع صديق",
+  "scripts": {
+    "start": "node --env-file-if-exists=.env friend-server.js",
+    "start:basic": "node server.js"
+  },
+  "dependencies": {
+    "socket.io": "^4.8.3"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.3"
+  }
+}
