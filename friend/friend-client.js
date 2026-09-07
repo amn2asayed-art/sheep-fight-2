@@ -177,7 +177,7 @@
 
   function rtOnPeerBye() {
     if (rt.role === 'host') {
-      if (rt.hostHadGuest && Date.now() - rt.lastPeerSeen > 1200) {
+      if (rt.hostHadGuest) {
         rt.hostHadGuest = false;
         roomReady = false;
         peerName = null;
@@ -242,12 +242,16 @@
       rt.channel.on('broadcast', { event: 'hb' }, function (msg) { rtOnPeerMessage(msg.payload); });
       rt.channel.on('broadcast', { event: 'bye' }, function () { rtOnPeerBye(); });
       rt.channel.on('broadcast', { event: 'match-start' }, function () { launchedFromPeer(); });
+      var settled = false;
       rt.channel.subscribe(function (status, sErr) {
+        if (settled) return;
         if (status !== 'SUBSCRIBED') {
+          settled = true;
           try { cb((sErr && sErr.message) || 'فشل الاتصال بـ Supabase.'); } catch (e) {}
           rtLeave();
           return;
         }
+        settled = true;
         rtBroadcast('hello', { role: 'host', name: currentName(), avatar: currentAvatar(), code: code });
         rtStartHeartbeat();
         rtWatchPeer();
@@ -269,12 +273,16 @@
       rt.channel.on('broadcast', { event: 'hb' }, function (msg) { rtOnPeerMessage(msg.payload); });
       rt.channel.on('broadcast', { event: 'bye' }, function () { rtOnPeerBye(); });
       rt.channel.on('broadcast', { event: 'match-start' }, function () { launchedFromPeer(); });
+      var settled = false;
       rt.channel.subscribe(function (status, sErr) {
+        if (settled) return;
         if (status !== 'SUBSCRIBED') {
+          settled = true;
           rtLeave();
           cb((sErr && sErr.message) || 'فشل الاتصال بـ Supabase.');
           return;
         }
+        settled = true;
         rtBroadcast('hello', { role: 'guest', name: currentName(), avatar: currentAvatar() });
         rtStartHeartbeat();
         rtWatchPeer();
