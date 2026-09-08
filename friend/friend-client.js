@@ -51,14 +51,22 @@
   }
   var fallbackName = null;
   function currentName() {
+    var name = null;
     try {
       if (window.ig && ig.game) {
-        if (ig.game.playerName && String(ig.game.playerName).trim()) return String(ig.game.playerName).trim();
-        if (ig.game.defaultPlayerName && String(ig.game.defaultPlayerName).trim()) return String(ig.game.defaultPlayerName).trim();
+        if (ig.game.playerName && String(ig.game.playerName).trim()) name = String(ig.game.playerName).trim();
+        else if (ig.game.defaultPlayerName && String(ig.game.defaultPlayerName).trim()) name = String(ig.game.defaultPlayerName).trim();
       }
     } catch (e) {}
-    if (!fallbackName) fallbackName = 'Player' + Math.floor(1000 + Math.random() * 9000);
-    return fallbackName;
+    if (!name) {
+      if (!fallbackName) fallbackName = 'Player' + Math.floor(1000 + Math.random() * 9000);
+      name = fallbackName;
+    }
+    // نثبّت الاسم على اللعبة حتى يظهر اسمنا نفسه في المباراة ولا يتغير عشوائياً
+    try {
+      if (window.ig && ig.game && (!ig.game.playerName || !String(ig.game.playerName).trim())) ig.game.playerName = name;
+    } catch (e) {}
+    return name;
   }
   function currentAvatar() {
     try {
@@ -105,13 +113,16 @@
     syncT: 0,
     myRoom: null,
     myPlayer: null,
+    myCount: 0,
+    myNames: [],
     peerRoom: null,
     probeTimer: null,
     goTimer: null,
+    refreshAt: 0,
   };
 
   function pairMaxAttempts() {
-    return (window.SheepFriendConfig && window.SheepFriendConfig.pairingMaxAttempts) || 5;
+    return (window.SheepFriendConfig && window.SheepFriendConfig.pairingMaxAttempts) || 8;
   }
 
   function serverNow() {
@@ -186,13 +197,22 @@
         var ng = ig.game.network_game;
         var room = ng && ng.roomId;
         var player = ng && ng.playerId;
+        var st = (ig.global && ig.global.initialGameState) || null;
+        var names = [];
         var count = 0;
-        try { var st = ig.global.initialGameState; count = (st && st.players) ? st.players.length : 0; } catch (e) {}
+        if (st && st.players) {
+          names = (typeof st.players.map === 'function') ? st.players.map(function (p) {
+            return String((p && (p.name || p.playerName)) || p || '').trim();
+          }).filter(Boolean) : [];
+          count = names.length;
+        }
         // رصد تغيّر الغرفة المخصصة لي
-        if (typeof room === 'number' && room !== pair.myRoom) {
+        if (typeof room === 'number' && (room !== pair.myRoom || count !== pair.myCount)) {
           pair.myRoom = room;
           pair.myPlayer = player;
-          rtBroadcast('room-info', { room: room, player: player, count: count });
+          pair.myCount = count;
+          pair.myNames = names;
+          rtBroadcast('room-info', { room: room, player: player, count: count, names: names });
         }
         // رصد "لا يوجد خصم" من اللعبة نفسها لإعادة المحاولة
         var ctrl = findPlayControl();
@@ -200,10 +220,33 @@
           ctrl.noMatchFound = false;
           pairRetry();
         }
+        // التحقق بمعيار الأسماء قبل معيار الغرفة: هل يوجد اسم صديقنا ضمن اللاعبين؟
+        var peerInRoom = false;
+        if (count >= 2 && peerName) {
+          var pn = String(peerName).trim().toLowerCase();
+          for (var k = 0; k < names.length; k++) {
+            if (String(names[k]).trim().toLowerCase() === pn) { peerInRoom = true; break; }
+          }
+        }
         if (pair.myRoom !== null && pair.peerRoom !== null) {
           if (pair.myRoom === pair.peerRoom) {
             if (count >= 2) pairSuccess();
+            else {
+              // نفس الغرفة لكن العرض قد يكون قديماً (المضيف العالق): اطلب تحديث الحالة
+              if (Date.now() > (pair.refreshAt || 0)) {
+                pair.refreshAt = Date.now() + 1200;
+                refreshRoomState();
+              }
+            }
+          } else if (count >= 2 && peerInRoom) {
+            // نفس اللاعبين فعلاً رغم اختلاف المعرف: غرفة الصديق
+            pair.myRoom = pair.peerRoom;
+            pairSuccess();
+          } else if (peerInRoom) {
+            pairSuccess();
           } else {
+            // في غرفة مختلفة، وحتى لو كانت ممتلئة فهي مع غريب عندنا لا نستسلم:
+            // نخرج فوراً ونعيد المحاولة (يتم داخل pairRetry عبر pair.retrying).
             pairRetry();
           }
         }
@@ -225,20 +268,12 @@
 
   function pairSuccess() {
     pairStop();
+    rtStopWatch(); // أثناء المباراة الحقيقية لا نلغيها عند غياب مؤقت للنبضات
     setStatus('تم الدخول في المباراة مع صديقك.', 'ok');
   }
 
   function pairRetry() {
     if (!pair.active || pair.retrying) return;
-    // إذا دخلنا فعلياً في مباراة ممتلئة بغرفة مختلفة، لا نلغي (قد نلعب مع غريب)
-    try {
-      var st = ig.global && ig.global.initialGameState;
-      if (st && st.players && st.players.length >= 2) {
-        setStatus('تم الدخول في غرفة مختلفة. أعد المحاولة من البداية.', 'error');
-        pairStop();
-        return;
-      }
-    } catch (e) {}
     pair.attempt++;
     if (pair.attempt > pairMaxAttempts()) {
       setStatus('تعذّر التزاوج مع صديقك. اضغط العب مجدداً.', 'error');
@@ -248,7 +283,10 @@
     }
     pair.retrying = true;
     pair.fired = false;
-    pair.myRoom = pair.myPlayer = pair.peerRoom = null;
+    pair.myRoom = pair.myPlayer = null;
+    pair.myCount = 0;
+    pair.myNames = [];
+    pair.peerRoom = null;
     forceCancel();
     var t = serverNow() + 160;
     pair.syncT = t;
@@ -263,9 +301,35 @@
       try { ctrl.cancelMatchmaking(); } catch (e) {}
     }
     var ng = ig.game.network_game;
+    try { ng && ng.leaveGame && ng.leaveGame(); } catch (e) {}
     try { ng && ng.cancelRequestGame && ng.cancelRequestGame(); } catch (e) {}
     if (ng) { ng.roomId = null; ng.playerId = null; }
     try { if (ng) ng.unhandledUpdateQueue = []; } catch (e) {}
+    // إن كانت المباراة قد بدأت فعلاً (لوحة اللعب ظهرت) خروج كامل إلى القائمة الرئيسية
+    try {
+      if (ig.game && ig.game.getEntitiesByType && ig.game.getEntitiesByType('EntityBoard').length > 0) {
+        if (!goHomeFromMatch()) {
+          var dir = ig.game.director;
+          if (dir && dir.levels && dir.levels.length) dir.jumpTo(dir.levels[0]);
+        }
+      }
+    } catch (e) {}
+  }
+  function goHomeFromMatch() {
+    try {
+      var ents = ig.game.entities || [];
+      for (var i = 0; i < ents.length; i++) {
+        var e = ents[i];
+        if (e && typeof e.returnToMainMenu === 'function') { e.returnToMainMenu(); return true; }
+      }
+    } catch (e) {}
+    return false;
+  }
+  function refreshRoomState() {
+    try {
+      var ng = ig.game.network_game;
+      if (ng && typeof ng.requestGameState === 'function') ng.requestGameState(null, null, null);
+    } catch (e) {}
   }
 
   // أحداث استقبال من الطرف الآخر عبر القناة
@@ -283,7 +347,10 @@
     if (pair.retrying) return;
     pair.retrying = false;
     pair.fired = false;
-    pair.myRoom = pair.myPlayer = pair.peerRoom = null;
+    pair.myRoom = pair.myPlayer = null;
+    pair.myCount = 0;
+    pair.myNames = [];
+    pair.peerRoom = null;
     forceCancel();
     var t = (p && typeof p.t === 'number') ? p.t : serverNow() + 160;
     pair.attempt = (p && typeof p.attempt === 'number') ? p.attempt : pair.attempt;
