@@ -50,14 +50,32 @@
     if (el.status) { el.status.className = 'friend-status'; el.status.textContent = ''; }
   }
   var fallbackName = null;
-  function currentName() {
-    var name = null;
+  function liveNameInput() {
     try {
-      if (window.ig && ig.game) {
-        if (ig.game.playerName && String(ig.game.playerName).trim()) name = String(ig.game.playerName).trim();
-        else if (ig.game.defaultPlayerName && String(ig.game.defaultPlayerName).trim()) name = String(ig.game.defaultPlayerName).trim();
+      var inputs = document.querySelectorAll('input');
+      for (var i = 0; i < inputs.length; i++) {
+        var inp = inputs[i];
+        if (inp.id === 'friendJoinInput') continue;
+        if (inp.closest && inp.closest('.friend-overlay')) continue;
+        if (inp.type === 'hidden') continue;
+        var v = String(inp.value || '').trim();
+        if (v) return v;
       }
     } catch (e) {}
+    return null;
+  }
+  function currentName() {
+    var name = null;
+    // 1) القيمة الحية التي كتبها المستخدم الآن في حقل الاسم (دقيقة لكل تبويب)
+    try { name = liveNameInput(); } catch (e) {}
+    if (!name) {
+      try {
+        if (window.ig && ig.game) {
+          if (ig.game.playerName && String(ig.game.playerName).trim()) name = String(ig.game.playerName).trim();
+          else if (ig.game.defaultPlayerName && String(ig.game.defaultPlayerName).trim()) name = String(ig.game.defaultPlayerName).trim();
+        }
+      } catch (e) {}
+    }
     if (!name) {
       if (!fallbackName) fallbackName = 'Player' + Math.floor(1000 + Math.random() * 9000);
       name = fallbackName;
@@ -604,11 +622,19 @@
     if (rt.joinFinalized) return;
     var cb = rt.joinCb; rt.joinCb = null;
     if (!host) return;
-    var mine = String(currentName() || '').trim().toLowerCase();
-    if (host.name && String(host.name).trim().toLowerCase() === mine) {
-      rtLeave();
-      try { cb && cb('اختر اسماً مختلفاً عن اسم الصديق.'); } catch (e) {}
-      return;
+    var mine = String(currentName() || '').trim();
+    var hostName = String(host.name || '').trim();
+    if (hostName && mine.toLowerCase() === hostName.toLowerCase()) {
+      // الاسم نفسه فعلاً (كتب كلاهما نفس الاسم أو ورثه من التخزين المشترك):
+      // نعطي الضيف اسماً تلقائياً مميزاً بدل رفض الانضمام.
+      var base = mine || 'Player';
+      var suffix = 2;
+      do {
+        mine = base + suffix;
+        suffix++;
+      } while (String(mine).toLowerCase() === hostName.toLowerCase());
+      try { if (window.ig && ig.game) ig.game.playerName = mine; } catch (e) {}
+      setStatus('اسماكما متطابقان، فدخلت باسم جديد: ' + mine, 'info');
     }
     rt.joinFinalized = true;
     if (rt.joinTimer) { clearTimeout(rt.joinTimer); rt.joinTimer = null; }
